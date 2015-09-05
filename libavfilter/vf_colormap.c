@@ -31,11 +31,18 @@
 #include "video.h"
 #include "drawutils.h"
 
+#include "libavutil/log.h"
 #include <stdio.h>
+
+enum map_name {
+    MAP_BONE,
+    MAP_AUTUMN,
+    NB_COLOR_MAP
+};
 
 typedef struct ColormapContext {
     const AVClass *class;
-    char   *map_name;
+    int   name;                 ///<map_name
     // Only 8bit depth for now
     uint8_t map[3][256];        /* lookup table for colour map */
     int zero_value;             /* zero_value < 0 ? 128 : zero_value */
@@ -52,8 +59,10 @@ typedef struct ThreadData {
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption colormap_options[] = {
-    { "map", "Name of the colormap", OFFSET(map_name),  AV_OPT_TYPE_STRING, { .str = "bone" }, .flags = FLAGS },
     { "zero", "The value of zero in the greyscale image", OFFSET(zero_value), AV_OPT_TYPE_INT, { .i64 = 0 }, INT_MIN, INT_MAX, .flags = FLAGS },
+    { "map", "select color map", OFFSET(name), AV_OPT_TYPE_INT, { .i64 = MAP_BONE }, 0, NB_COLOR_MAP - 1, FLAGS, "map_name" },
+    { "bone", "bone colour map", 0, AV_OPT_TYPE_CONST, { .i64 = MAP_BONE }, INT_MIN, INT_MAX, FLAGS, "map_name" },
+    { "autumn", "autumn colour map", 0, AV_OPT_TYPE_CONST, { .i64 = MAP_AUTUMN }, INT_MIN, INT_MAX, FLAGS, "map_name" },
     { NULL }
 };
 
@@ -79,6 +88,83 @@ static int query_formats(AVFilterContext *ctx)
     return 0;
 }
 
+static void linear_gradient(uint8_t vec[256], const double *pts, const int len, const int min, const int zero, const int max)
+{
+    double x, dx, x0, x1, y0, y1;
+    int val, i = 0; 
+
+    // Negative values
+    x = -1.0;
+    dx = 1.0 / (zero - min);
+    for (val = min; val < zero; val++, x += dx) {
+        x0 = pts[i + 0]; x1 = pts[i + 2];
+        y0 = pts[i + 1]; y1 = pts[i + 3];
+        vec[val] = av_clipd((y1 - y0) / (x1 - x0) * (x - x0) + y0, 0.0, 1.0) * 255.0;
+        // Using the while loop gives room for left and right values of points
+        while (x >= pts[i + 2] && i < len)
+            i++;
+    }
+    // Positive values
+    x = 0.0;
+    dx = 1.0 / (max - zero);
+    printf("Transition point: %d,\n\t%f\t%f\n\t%f\t%f\n", val, pts[i], pts[i+1], pts[i+2], pts[i+3]);
+    for (val = zero; val <= max; val++, x += dx) {
+        x0 = pts[i + 0]; x1 = pts[i + 2];
+        y0 = pts[i + 1]; y1 = pts[i + 3];
+        vec[val] = av_clipd((y1 - y0) / (x1 - x0) * (x - x0) + y0, 0.0, 1.0) * 255.0;
+        // printf("%f\t%f\t%f\n", y0 * 255, vec[val], y1 * 255);
+        // Using the while loop gives room for left and right values of points
+        while (x >= pts[i + 2] && i/2 < len - 1) {
+            i += 2;
+            printf("inner Transition point: %d,\n\t%f\t%f\n\t%f\t%f\n", val, pts[i], pts[i+1], pts[i+2], pts[i+3]);
+        }
+    }
+    
+}
+
+static double bone_data[3][8] = {
+    {       // red
+        0.0,        0.0,
+        0.746032,   0.652778,
+        1.0,        1.0,
+        1.0,        1.0
+    }, {    // green
+        0.0,        0.0,
+        0.365079,   0.319444,
+        0.746032,   0.777778,
+        1.0,        1.0
+    }, {    // blue
+        0.0,       0.0,
+        0.365079,  0.444444,
+        1.0,        1.0,
+        1.0,       1.0
+    }
+};
+
+static double fall_data[3][4] = {
+    {       // red
+        0.0, 1.0,
+        1.0, 1.0
+    }, {    // green
+        0.0,        0.0,
+        1.0,        1.0
+    }, {    // blue
+        0.0,       0.0,
+        1.0,       0.0
+    }
+};
+
+static void fill_bone_map(uint8_t lut[3][256], uint8_t *rgba_map, int min, int max, int zero) 
+{
+    const uint8_t R = rgba_map[0];
+    const uint8_t G = rgba_map[1];
+    const uint8_t B = rgba_map[2];
+
+    linear_gradient(lut[R], bone_data[0], 3, 0, 0, 255);
+    linear_gradient(lut[G], bone_data[1], 4, 0, 0, 255);
+    linear_gradient(lut[B], bone_data[2], 3, 0, 0, 255);
+}
+
 static void fill_autumn_map(uint8_t lut[3][256], uint8_t *rgba_map, int min, int max, int zero) {
 
     int val;
@@ -87,7 +173,6 @@ static void fill_autumn_map(uint8_t lut[3][256], uint8_t *rgba_map, int min, int
     const uint8_t G = rgba_map[1];
     const uint8_t B = rgba_map[2];
 
-    printf("autumn colour scheme, %d, %d, %d, %d, %d\n", R, G, B, min, max);
     for (val = min; val < zero; val++) {
         lut[R][val] = 0;
         lut[G][val] = 0;
@@ -100,6 +185,10 @@ static void fill_autumn_map(uint8_t lut[3][256], uint8_t *rgba_map, int min, int
         lut[G][val] = av_clipd(res, 0.0, 1.0) * 255.0;
         lut[B][val] = 0;
     }
+
+    linear_gradient(lut[R], fall_data[0], 2, 0, 0, 255);
+    linear_gradient(lut[G], fall_data[1], 2, 0, 0, 255);
+    linear_gradient(lut[B], fall_data[2], 2, 0, 0, 255);
 }
 
 
@@ -113,9 +202,17 @@ static int config_output(AVFilterLink *outlink)
     ff_fill_rgba_map(rgba_map, outlink->format);
     s->step = av_get_bits_per_pixel(desc) >> 3;
 
-    printf("setting up lookup table\n");
     // TODO allow for a choice of colourmaps
-    fill_autumn_map(s->map, rgba_map, 0, 255, 0);
+    switch (s->name){
+    case MAP_BONE:
+        fill_bone_map(s->map, rgba_map, 0, 255, 0);
+        break;
+    case MAP_AUTUMN:
+        fill_autumn_map(s->map, rgba_map, 0, 255, 0);
+        break;
+    default:
+        return AVERROR(ENOMEM);
+    }
 
     return 0;
 }
