@@ -126,6 +126,7 @@ void avfilter_register_all(void)
     REGISTER_FILTER(COLORCHANNELMIXER, colorchannelmixer, vf);
     REGISTER_FILTER(COLORKEY,       colorkey,       vf);
     REGISTER_FILTER(COLORLEVELS,    colorlevels,    vf);
+    REGISTER_FILTER(COLORMAP,       colormap,       vf);
     REGISTER_FILTER(COLORMATRIX,    colormatrix,    vf);
     REGISTER_FILTER(COPY,           copy,           vf);
     REGISTER_FILTER(COVER_RECT,     cover_rect,     vf);
